@@ -3,17 +3,14 @@ import torchvision.transforms as transforms
 from PIL import Image
 import os
 
-class CartoonsDataset(Dataset):
+class DiredDataset(Dataset):
     def __init__(self, root, transform=None):
         self.root = root
         self.transform = transform
         self.images = []
-        for dir in os.listdir(root):
-            dir_path = os.path.join(root, dir)
-            if not os.path.isdir(dir_path):
-                continue
-            for img in os.listdir(dir_path):
-                self.images.append(os.path.join(dir_path, img))
+        for img in os.listdir(root):
+            if img.lower().endswith(".png") or img.lower().endswith(".jpg"):
+                self.images.append(os.path.join(root, img))
 
     def __getitem__(self, index):
         img_path = self.images[index]
@@ -36,7 +33,7 @@ class CartoonsDataset(Dataset):
 #     ])
 #
 #     # Инициализируем датасет
-#     datasets = CartoonsDataset(transform=tf)
+#     datasets = RealPhotosDataset(transform=tf)
 #
 #     print(f"Всего картинок: {len(datasets)}")
 #

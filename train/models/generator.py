@@ -64,13 +64,15 @@ class ResNetGenerator(nn.Module):
 
         # 4. Апсэмплинг (увеличиваем разрешение обратно)
         self.up1 = nn.Sequential(
-            nn.ConvTranspose2d(ngf * 4, ngf * 2, kernel_size=3, stride=2, padding=1, output_padding=1, bias=False),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),  # Сначала плавно растягиваем
+            nn.Conv2d(ngf * 4, ngf * 2, kernel_size=3, stride=1, padding=1, bias=False),  # Потом сворачиваем
             nn.InstanceNorm2d(ngf * 2),
             nn.ReLU(True)
         )
         self.up2 = nn.Sequential(
-            nn.ConvTranspose2d(ngf * 2, ngf, kernel_size=3, stride=2, padding=1, output_padding=1, bias=False),
-            nn.InstanceNorm2d(ngf),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),  # Сначала плавно растягиваем
+            nn.Conv2d(ngf * 2, ngf, kernel_size=3, stride=1, padding=1, bias=False),  # Потом сворачиваем
+            nn.InstanceNorm2d(ngf * 2),
             nn.ReLU(True)
         )
 
@@ -111,18 +113,18 @@ class ResNetGenerator(nn.Module):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 # Блок для проверки
-if __name__ == "__main__":
-    # Создаем случайную картинку 256x256 (1 картинка, 3 канала)
-    dummy_input = torch.randn(1, 3, 256, 256)
-
-    # Инициализируем генератор
-    generator = ResNetGenerator()
-
-    # Прогоняем картинку
-    output = generator(dummy_input)
-
-    print(generator.count_parameters())
-    print(f"Вход: {dummy_input.shape}")
-    print(f"Выход: {output.shape}")
-    print(f"Мин. значение: {output.min().item():.4f}")
-    print(f"Макс. значение: {output.max().item():.4f}")
+# if __name__ == "__main__":
+#     # Создаем случайную картинку 256x256 (1 картинка, 3 канала)
+#     dummy_input = torch.randn(1, 3, 256, 256)
+#
+#     # Инициализируем генератор
+#     generator = ResNetGenerator()
+#
+#     # Прогоняем картинку
+#     output = generator(dummy_input)
+#
+#     print(generator.count_parameters())
+#     print(f"Вход: {dummy_input.shape}")
+#     print(f"Выход: {output.shape}")
+#     print(f"Мин. значение: {output.min().item():.4f}")
+#     print(f"Макс. значение: {output.max().item():.4f}")

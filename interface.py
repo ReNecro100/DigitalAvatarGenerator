@@ -7,12 +7,12 @@ from train.models.generator import ResNetGenerator
 from train.train_coeffs import DEVICE
 
 
-def test_model(image_path, output_path=r"checkpoints\test_result.png"):
+def test_model(image_path, output_path=r"checkpoints\Alice 2.png"):
     # 1. Создаем генератор и загружаем веса
     model = ResNetGenerator().to(DEVICE)
 
     # Ищем файл весов (если сохранял с эпохами, берем последний)
-    weights_path = "checkpoints/G_model.pth"  # или G_epoch_10.pth
+    weights_path = "checkpoints/G_model_epoch25.pth"  # или G_epoch_10.pth
     if not os.path.exists(weights_path):
         print(f"Ошибка: Файл {weights_path} не найден!")
         return

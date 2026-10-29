@@ -6,8 +6,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
 
-from data.datasets.cartoons import CartoonsDataset
-from data.datasets.real_photos import RealPhotosDataset
+from data.datasets.double_dired_dataset import DoubledDiredDataset
+from data.datasets.dired_dataset import DiredDataset
 
 from train.models.discriminator import PatchGANDiscriminator
 from train.models.generator import ResNetGenerator
@@ -21,8 +21,8 @@ if __name__ == '__main__':
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
-    cartoon_dataset = CartoonsDataset(CARTOONS_DATASET_DIRECTORY,tf)
-    real_photos_dataset = RealPhotosDataset(REAL_PHOTOS_DATASET_DIRECTORY,tf)
+    cartoon_dataset = DiredDataset(CARTOONS_DATASET_DIRECTORY,tf)
+    real_photos_dataset = DiredDataset(REAL_PHOTOS_DATASET_DIRECTORY,tf)
 
     #Creating dataloaders
     cartoon_dataloader = DataLoader(cartoon_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
@@ -46,6 +46,13 @@ if __name__ == '__main__':
 
     print(DEVICE)
 
+    # dir for checkpoints
+    current_dir = os.path.dirname(os.path.abspath(__file__))  # папка train
+    project_root = os.path.dirname(current_dir)  # корень проекта
+    checkpoints_dir = os.path.join(project_root, "checkpoints")
+
+    os.makedirs(checkpoints_dir, exist_ok=True)
+
     #train loop
     for epoch in range(EPOCHS):
         print(f"Epoch {epoch + 1}/{EPOCHS}:")
@@ -56,7 +63,7 @@ if __name__ == '__main__':
 
         loader_X = iter(real_photos_dataloader)
         loader_Y = iter(cartoon_dataloader)
-        max_batches = 1000 #min(len(real_photos_dataloader), len(cartoon_dataloader))
+        max_batches = 2000 #min(len(real_photos_dataloader), len(cartoon_dataloader))
 
         for _ in tqdm(range(max_batches)):
             # batches
@@ -135,7 +142,7 @@ if __name__ == '__main__':
             loss_identity_Y = torch.nn.functional.l1_loss(identity_Y, real_Y)
 
             # (lambda_cycle=10, lambda_identity=0.5)
-            loss_G = loss_adversarial_G + (10.0 * loss_cycle_X) + (0.5 * loss_identity_Y)
+            loss_G = (ADVERSIAL_WEIGHT * loss_adversarial_G) + (CYCLE_WEIGHT * loss_cycle_X) + (IDENTITY_WEIGHT * loss_identity_Y)
 
 
 
@@ -156,7 +163,7 @@ if __name__ == '__main__':
             loss_identity_X = torch.nn.functional.l1_loss(identity_X, real_X)
 
             # (lambda_cycle=10, lambda_identity=0.5)
-            loss_F = loss_adversarial_F + (10.0 * loss_cycle_Y) + (0.5 * loss_identity_X)
+            loss_F = (ADVERSIAL_WEIGHT * loss_adversarial_F) + (CYCLE_WEIGHT * loss_cycle_Y) + (IDENTITY_WEIGHT * loss_identity_X)
 
 
 
@@ -169,14 +176,9 @@ if __name__ == '__main__':
 
             optimizer_g.step()
             optimizer_f.step()
-    current_dir = os.path.dirname(os.path.abspath(__file__))  # папка train
-    project_root = os.path.dirname(current_dir)  # корень проекта
-    checkpoints_dir = os.path.join(project_root, "checkpoints")
-
-    os.makedirs(checkpoints_dir, exist_ok=True)
-
-    # Сохраняем веса
-    torch.save(generator_g.state_dict(), os.path.join(checkpoints_dir, f"G_model.pth"))
-    torch.save(generator_f.state_dict(), os.path.join(checkpoints_dir, f"F_model.pth"))
-    torch.save(discriminator_x.state_dict(), os.path.join(checkpoints_dir, f"D_X_model.pth"))
-    torch.save(discriminator_y.state_dict(), os.path.join(checkpoints_dir, f"D_Y_model.pth"))
+        if (epoch + 1) % 5 == 0 or (epoch + 1) == EPOCHS:
+            # Сохраняем веса
+            torch.save(generator_g.state_dict(), os.path.join(checkpoints_dir, f"G_model_epoch{epoch + 1}.pth"))
+            torch.save(generator_f.state_dict(), os.path.join(checkpoints_dir, f"F_model_epoch{epoch + 1}.pth"))
+            torch.save(discriminator_x.state_dict(), os.path.join(checkpoints_dir, f"D_X_model_epoch{epoch + 1}.pth"))
+            torch.save(discriminator_y.state_dict(), os.path.join(checkpoints_dir, f"D_Y_model_epoch{epoch + 1}.pth"))
