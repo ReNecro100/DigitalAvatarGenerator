@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from train.models.CAM import CAMMap
+
 
 class PatchGANDiscriminator(nn.Module):
     """
@@ -38,8 +40,9 @@ class PatchGANDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True)
         )
 
+        self.cam_map = CAMMap(ndf * 8)
+
         # Conv5: 1 фильтр (итоговая карта), stride=1.
-        # Выход зажимается Sigmoid'ом от 0 до 1, как в таблице.
         self.conv5 = nn.Sequential(
             nn.Conv2d(ndf * 8, 1, kernel_size=4, stride=1, padding=1),
         )
@@ -49,8 +52,9 @@ class PatchGANDiscriminator(nn.Module):
         x = self.conv2(x)
         x = self.conv3(x)
         x = self.conv4(x)
+        cam_map = self.cam_map(x)
         x = self.conv5(x)
-        return x
+        return (x, cam_map)
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

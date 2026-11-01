@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from train.models.AdaLIN import *
+from train.models.CAM import CAMMap
 
 
 class ResNetBlock(nn.Module):
@@ -62,17 +64,20 @@ class ResNetGenerator(nn.Module):
         self.res8 = ResNetBlock(ngf * 4)
         self.res9 = ResNetBlock(ngf * 4)
 
+        # 2.5 CAM-карта
+        self.cam_map = CAMMap(ngf * 4)
+
         # 4. Апсэмплинг (увеличиваем разрешение обратно)
         self.up1 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),  # Сначала плавно растягиваем
             nn.Conv2d(ngf * 4, ngf * 2, kernel_size=3, stride=1, padding=1, bias=False),  # Потом сворачиваем
-            nn.InstanceNorm2d(ngf * 2),
+            AdaLIN(ngf * 2),
             nn.ReLU(True)
         )
         self.up2 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),  # Сначала плавно растягиваем
             nn.Conv2d(ngf * 2, ngf, kernel_size=3, stride=1, padding=1, bias=False),  # Потом сворачиваем
-            nn.InstanceNorm2d(ngf * 2),
+            AdaLIN(ngf),
             nn.ReLU(True)
         )
 
@@ -102,17 +107,20 @@ class ResNetGenerator(nn.Module):
         x = self.res8(x)
         x = self.res9(x)
 
+        # 3.5 CAM-карта
+        cam = self.cam_map(x)
+
         # 4. Разжатие
         x = self.up1(x)
         x = self.up2(x)
 
         # 5. Выход
-        return self.final(x)
+        return (self.final(x), cam)
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-# Блок для проверки
+#Блок для проверки
 # if __name__ == "__main__":
 #     # Создаем случайную картинку 256x256 (1 картинка, 3 канала)
 #     dummy_input = torch.randn(1, 3, 256, 256)
@@ -121,9 +129,10 @@ class ResNetGenerator(nn.Module):
 #     generator = ResNetGenerator()
 #
 #     # Прогоняем картинку
-#     output = generator(dummy_input)
+#     output, cam = generator(dummy_input)
 #
 #     print(generator.count_parameters())
+#     print(cam.shape)
 #     print(f"Вход: {dummy_input.shape}")
 #     print(f"Выход: {output.shape}")
 #     print(f"Мин. значение: {output.min().item():.4f}")

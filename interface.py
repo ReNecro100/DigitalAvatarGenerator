@@ -12,7 +12,7 @@ def test_model(image_path, output_path=r"checkpoints\Alice 2.png"):
     model = ResNetGenerator().to(DEVICE)
 
     # Ищем файл весов (если сохранял с эпохами, берем последний)
-    weights_path = "checkpoints/G_model_epoch25.pth"  # или G_epoch_10.pth
+    weights_path = "checkpoints/G_model_epoch30.pth"  # или G_epoch_10.pth
     if not os.path.exists(weights_path):
         print(f"Ошибка: Файл {weights_path} не найден!")
         return
@@ -32,7 +32,7 @@ def test_model(image_path, output_path=r"checkpoints\Alice 2.png"):
 
     # 3. Генерация
     with torch.no_grad():
-        output_tensor = model(input_tensor)
+        output_tensor, _ = model(input_tensor)
 
     # 4. Сохранение результата (переводим из [-1, 1] обратно в [0, 1])
     vutils.save_image(output_tensor, output_path, normalize=True)

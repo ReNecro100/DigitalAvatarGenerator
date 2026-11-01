@@ -63,7 +63,7 @@ if __name__ == '__main__':
 
         loader_X = iter(real_photos_dataloader)
         loader_Y = iter(cartoon_dataloader)
-        max_batches = 2000 #min(len(real_photos_dataloader), len(cartoon_dataloader))
+        max_batches = min(len(real_photos_dataloader), len(cartoon_dataloader))
 
         for _ in tqdm(range(max_batches)):
             # batches
@@ -74,26 +74,32 @@ if __name__ == '__main__':
             real_Y = real_Y.to(DEVICE)
 
             # true photos
-            pred_real_X = discriminator_x(real_X)
+            pred_real_X, cam_D_X_real = discriminator_x(real_X)
             loss_D_X_real = criterion_d_x(pred_real_X, torch.ones_like(pred_real_X))
+            loss_cam_D_X_real = criterion_d_x(cam_D_X_real, torch.ones_like(cam_D_X_real))
 
             # fake photos
-            fake_X = generator_f(real_Y)
-            pred_fake_X = discriminator_x(fake_X.detach())
+            fake_X, _ = generator_f(real_Y)
+            pred_fake_X, cam_D_X_fake = discriminator_x(fake_X.detach())
             loss_D_X_fake = criterion_d_x(pred_fake_X, torch.zeros_like(pred_fake_X))
+            loss_cam_D_X_fake = criterion_d_x(cam_D_X_fake, torch.zeros_like(cam_D_X_fake))
 
-            loss_D_X = (loss_D_X_real + loss_D_X_fake) * 0.5
+            loss_cam_D_X = (loss_cam_D_X_real + loss_cam_D_X_fake) * 0.5
+            loss_D_X = (loss_D_X_real + loss_D_X_fake) * 0.5 + loss_cam_D_X
 
             # real cartoons
-            pred_real_Y = discriminator_y(real_Y)
+            pred_real_Y, cam_D_Y_real = discriminator_y(real_Y)
             loss_D_Y_real = criterion_d_y(pred_real_Y, torch.ones_like(pred_real_Y))
+            loss_cam_D_Y_real = criterion_d_y(cam_D_Y_real, torch.ones_like(cam_D_Y_real))
 
             # fake cartoons
-            fake_Y = generator_g(real_X)
-            pred_fake_Y = discriminator_y(fake_Y.detach())
+            fake_Y, _ = generator_g(real_X)
+            pred_fake_Y, cam_D_Y_fake = discriminator_y(fake_Y.detach())
             loss_D_Y_fake = criterion_d_y(pred_fake_Y, torch.zeros_like(pred_fake_Y))
+            loss_cam_D_Y_fake = criterion_d_y(cam_D_Y_fake, torch.zeros_like(cam_D_Y_fake))
 
-            loss_D_Y = (loss_D_Y_real + loss_D_Y_fake) * 0.5
+            loss_cam_D_Y = (loss_cam_D_Y_real + loss_cam_D_Y_fake) * 0.5
+            loss_D_Y = (loss_D_Y_real + loss_D_Y_fake) * 0.5 + loss_cam_D_Y
 
             # update the weights
             optimizer_x.zero_grad()
@@ -126,44 +132,56 @@ if __name__ == '__main__':
             real_Y = real_Y.to(DEVICE)
 
             # G generates
-            cartoon_G = generator_g(real_X)
+            cartoon_G, cam_G = generator_g(real_X)
 
             # adversarial loss
             with torch.no_grad():
-                pred_fake_Y = discriminator_y(cartoon_G)
+                pred_fake_Y, cam_D_Y = discriminator_y(cartoon_G)
             loss_adversarial_G = criterion_d_y(pred_fake_Y, torch.ones_like(pred_fake_Y))
 
             # cycle loss
-            rec_X = generator_f(cartoon_G)
+            rec_X, _ = generator_f(cartoon_G)
             loss_cycle_X = torch.nn.functional.l1_loss(rec_X, real_X)
 
             # identity loss
-            identity_Y = generator_g(real_Y)
+            identity_Y, _ = generator_g(real_Y)
             loss_identity_Y = torch.nn.functional.l1_loss(identity_Y, real_Y)
 
-            # (lambda_cycle=10, lambda_identity=0.5)
-            loss_G = (ADVERSIAL_WEIGHT * loss_adversarial_G) + (CYCLE_WEIGHT * loss_cycle_X) + (IDENTITY_WEIGHT * loss_identity_Y)
+            # CAM Loss для генератора: хотим, чтобы cam_G была похожа на cam_D_Y
+            loss_cam_G = torch.nn.functional.l1_loss(
+                torch.nn.functional.adaptive_avg_pool2d(cam_G, (1,1)).mean(dim=1, keepdim=True),
+                torch.nn.functional.adaptive_avg_pool2d(cam_D_Y, (1,1)).mean(dim=1, keepdim=True)
+            )
+
+            # total loss
+            loss_G = (ADVERSIAL_WEIGHT * loss_adversarial_G) + (CYCLE_WEIGHT * loss_cycle_X) + (IDENTITY_WEIGHT * loss_identity_Y) + (CAM_WEIGHT * loss_cam_G)
 
 
 
             # F generates
-            cartoon_F = generator_f(real_Y)
+            cartoon_F, cam_F = generator_f(real_Y)
 
             # adversarial loss
             with torch.no_grad():
-                pred_fake_X = discriminator_x(cartoon_F)
+                pred_fake_X, cam_D_X = discriminator_x(cartoon_F)
             loss_adversarial_F = criterion_d_x(pred_fake_X, torch.ones_like(pred_fake_X))
 
             # cycle loss
-            rec_Y = generator_g(cartoon_F)
+            rec_Y, _ = generator_g(cartoon_F)
             loss_cycle_Y = torch.nn.functional.l1_loss(rec_Y, real_Y)
 
             # identity loss
-            identity_X = generator_f(real_X)
+            identity_X, _ = generator_f(real_X)
             loss_identity_X = torch.nn.functional.l1_loss(identity_X, real_X)
 
+            # CAM Loss для генератора: хотим, чтобы cam_F была похожа на cam_D_X
+            loss_cam_F = torch.nn.functional.l1_loss(
+                torch.nn.functional.adaptive_avg_pool2d(cam_F, (1,1)).mean(dim=1, keepdim=True),
+                torch.nn.functional.adaptive_avg_pool2d(cam_D_X, (1,1)).mean(dim=1, keepdim=True)
+            )
+
             # (lambda_cycle=10, lambda_identity=0.5)
-            loss_F = (ADVERSIAL_WEIGHT * loss_adversarial_F) + (CYCLE_WEIGHT * loss_cycle_Y) + (IDENTITY_WEIGHT * loss_identity_X)
+            loss_F = (ADVERSIAL_WEIGHT * loss_adversarial_F) + (CYCLE_WEIGHT * loss_cycle_Y) + (IDENTITY_WEIGHT * loss_identity_X) + (CAM_WEIGHT * loss_cam_F)
 
 
 
