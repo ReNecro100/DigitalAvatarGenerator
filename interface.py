@@ -7,12 +7,12 @@ from train.models.generator import ResNetGenerator
 from train.train_coeffs import DEVICE
 
 
-def test_model(image_path, output_path=r"checkpoints\aw2.png"):
+def test_model(image_path, output_path=r"checkpoints\Alice 2.png"):
     # 1. Создаем генератор и загружаем веса
     model = ResNetGenerator().to(DEVICE)
 
     # Ищем файл весов (если сохранял с эпохами, берем последний)
-    weights_path = "checkpoints/G_model_epoch40.pth"  # или G_epoch_10.pth
+    weights_path = "checkpoints/G_model_epoch50.pth"  # или G_epoch_10.pth
     if not os.path.exists(weights_path):
         print(f"Ошибка: Файл {weights_path} не найден!")
         return
@@ -41,5 +41,5 @@ def test_model(image_path, output_path=r"checkpoints\aw2.png"):
 
 if __name__ == "__main__":
     # Укажи путь к любому фото (например, из датасета FFHQ)
-    test_image = r"checkpoints\aw.png"
+    test_image = r"checkpoints\Alice.png"
     test_model(test_image)
