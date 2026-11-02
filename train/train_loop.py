@@ -56,6 +56,11 @@ if __name__ == '__main__':
     #train loop
     for epoch in range(EPOCHS):
         print(f"Epoch {epoch + 1}/{EPOCHS}:")
+        # generator_g.load_state_dict(torch.load(f"{checkpoints_dir}/G_model_epoch30.pth"))
+        # generator_f.load_state_dict(torch.load(f"{checkpoints_dir}/F_model_epoch30.pth"))
+        # discriminator_y.load_state_dict(torch.load(f"{checkpoints_dir}/D_Y_model_epoch30.pth"))
+        # discriminator_x.load_state_dict(torch.load(f"{checkpoints_dir}/D_X_model_epoch30.pth"))
+
         print(f"Training discriminators...")
         # training discriminators
         generator_g.eval()
@@ -147,11 +152,21 @@ if __name__ == '__main__':
             identity_Y, _ = generator_g(real_Y)
             loss_identity_Y = torch.nn.functional.l1_loss(identity_Y, real_Y)
 
-            # CAM Loss для генератора: хотим, чтобы cam_G была похожа на cam_D_Y
-            loss_cam_G = torch.nn.functional.l1_loss(
-                torch.nn.functional.adaptive_avg_pool2d(cam_G, (1,1)).mean(dim=1, keepdim=True),
-                torch.nn.functional.adaptive_avg_pool2d(cam_D_Y, (1,1)).mean(dim=1, keepdim=True)
+            # CAM Loss для генератора: сравниваем тепловые карты (пространственно)
+            # 1. Превращаем многоканальные карты в одноканальные (усредняем по каналам)
+            cam_G_map = cam_G.mean(dim=1, keepdim=True)  # [B, 1, 32, 32]
+            cam_D_Y_map = cam_D_Y.mean(dim=1, keepdim=True)  # [B, 1, 15, 15]
+
+            # 2. Растягиваем карту генератора до размера карты дискриминатора
+            cam_G_resized = torch.nn.functional.interpolate(
+                cam_G_map,
+                size=cam_D_Y_map.shape[2:],
+                mode='bilinear',
+                align_corners=False
             )
+
+            # 3. Считаем L1-потерю между картами внимания
+            loss_cam_G = torch.nn.functional.l1_loss(cam_G_resized, cam_D_Y_map)
 
             # total loss
             loss_G = (ADVERSIAL_WEIGHT * loss_adversarial_G) + (CYCLE_WEIGHT * loss_cycle_X) + (IDENTITY_WEIGHT * loss_identity_Y) + (CAM_WEIGHT * loss_cam_G)
@@ -174,11 +189,21 @@ if __name__ == '__main__':
             identity_X, _ = generator_f(real_X)
             loss_identity_X = torch.nn.functional.l1_loss(identity_X, real_X)
 
-            # CAM Loss для генератора: хотим, чтобы cam_F была похожа на cam_D_X
-            loss_cam_F = torch.nn.functional.l1_loss(
-                torch.nn.functional.adaptive_avg_pool2d(cam_F, (1,1)).mean(dim=1, keepdim=True),
-                torch.nn.functional.adaptive_avg_pool2d(cam_D_X, (1,1)).mean(dim=1, keepdim=True)
+            # CAM Loss для генератора: сравниваем тепловые карты (пространственно)
+            # 1. Превращаем многоканальные карты в одноканальные (усредняем по каналам)
+            cam_F_map = cam_F.mean(dim=1, keepdim=True)  # [B, 1, 32, 32]
+            cam_D_X_map = cam_D_X.mean(dim=1, keepdim=True)  # [B, 1, 15, 15]
+
+            # 2. Растягиваем карту генератора до размера карты дискриминатора
+            cam_F_resized = torch.nn.functional.interpolate(
+                cam_F_map,
+                size=cam_D_X_map.shape[2:],
+                mode='bilinear',
+                align_corners=False
             )
+
+            # 3. Считаем L1-потерю между картами внимания
+            loss_cam_F = torch.nn.functional.l1_loss(cam_F_resized, cam_D_X_map)
 
             # (lambda_cycle=10, lambda_identity=0.5)
             loss_F = (ADVERSIAL_WEIGHT * loss_adversarial_F) + (CYCLE_WEIGHT * loss_cycle_Y) + (IDENTITY_WEIGHT * loss_identity_X) + (CAM_WEIGHT * loss_cam_F)
