@@ -1,139 +1,164 @@
 import torch
 import torch.nn as nn
-from train.models.AdaLIN import *
-from train.models.CAM import CAMMap
+from train.models.AdaILN import adaILN, ILN
 
 
-class ResNetBlock(nn.Module):
-    """Один Residual блок (сохраняет черты лица благодаря skip-connection)"""
+class ResnetBlock(nn.Module):
+    # Обычный residual блок для энкодера (использует InstanceNorm)
+    def __init__(self, dim, use_bias):
+        super(ResnetBlock, self).__init__()
+        conv_block = []
+        conv_block += [nn.ReflectionPad2d(1),
+                       nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=0, bias=use_bias),
+                       nn.InstanceNorm2d(dim),
+                       nn.ReLU(True)]
 
-    def __init__(self, dim):
-        super(ResNetBlock, self).__init__()
-        self.block = nn.Sequential(
-            nn.ReflectionPad2d(1),
-            nn.Conv2d(dim, dim, kernel_size=3, padding=0, bias=False),
-            nn.InstanceNorm2d(dim),
-            nn.ReLU(True),
-            nn.ReflectionPad2d(1),
-            nn.Conv2d(dim, dim, kernel_size=3, padding=0, bias=False),
-            nn.InstanceNorm2d(dim)
-        )
+        conv_block += [nn.ReflectionPad2d(1),
+                       nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=0, bias=use_bias),
+                       nn.InstanceNorm2d(dim)]
 
-    def forward(self, x):
-        # Прибавляем исходный x к результату (skip connection)
-        return x + self.block(x)
-
-
-class ResNetGenerator(nn.Module):
-    """
-    Генератор (Фото -> Мультик или Мультик -> Фото).
-    Явно прописанные слои, без циклов.
-    """
-
-    def __init__(self, input_nc=3, output_nc=3, ngf=64):
-        super(ResNetGenerator, self).__init__()
-
-        # 1. Начальный слой (ngf = 64 фильтра)
-        self.initial = nn.Sequential(
-            nn.ReflectionPad2d(3),
-            nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=False),
-            nn.InstanceNorm2d(ngf),
-            nn.ReLU(True)
-        )
-
-        # 2. Даунсэмплинг (уменьшаем разрешение в 2 раза, потом еще в 2)
-        self.down1 = nn.Sequential(
-            nn.Conv2d(ngf, ngf * 2, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.InstanceNorm2d(ngf * 2),
-            nn.ReLU(True)
-        )
-        self.down2 = nn.Sequential(
-            nn.Conv2d(ngf * 2, ngf * 4, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.InstanceNorm2d(ngf * 4),
-            nn.ReLU(True)
-        )
-
-        # 3. Девять Residual блоков (работаем с разрешением 64x64 и 256 фильтрами)
-        self.res1 = ResNetBlock(ngf * 4)
-        self.res2 = ResNetBlock(ngf * 4)
-        self.res3 = ResNetBlock(ngf * 4)
-        self.res4 = ResNetBlock(ngf * 4)
-        self.res5 = ResNetBlock(ngf * 4)
-        self.res6 = ResNetBlock(ngf * 4)
-        self.res7 = ResNetBlock(ngf * 4)
-        self.res8 = ResNetBlock(ngf * 4)
-        self.res9 = ResNetBlock(ngf * 4)
-
-        # 2.5 CAM-карта
-        self.cam_map = CAMMap(ngf * 4)
-
-        # 4. Апсэмплинг (увеличиваем разрешение обратно)
-        self.up1 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),  # Сначала плавно растягиваем
-            nn.Conv2d(ngf * 4, ngf * 2, kernel_size=3, stride=1, padding=1, bias=False),  # Потом сворачиваем
-            AdaLIN(ngf * 2),
-            nn.ReLU(True)
-        )
-        self.up2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),  # Сначала плавно растягиваем
-            nn.Conv2d(ngf * 2, ngf, kernel_size=3, stride=1, padding=1, bias=False),  # Потом сворачиваем
-            AdaLIN(ngf),
-            nn.ReLU(True)
-        )
-
-        # 5. Финальный слой (выход 3 канала RGB, значения от -1 до 1)
-        self.final = nn.Sequential(
-            nn.ReflectionPad2d(3),
-            nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0),
-            nn.Tanh()
-        )
+        self.conv_block = nn.Sequential(*conv_block)
 
     def forward(self, x):
-        # 1. Начало
-        x = self.initial(x)
+        out = x + self.conv_block(x)
+        return out
 
-        # 2. Сжатие
-        x = self.down1(x)
-        x = self.down2(x)
 
-        # 3. Магия стилизации (9 блоков)
-        x = self.res1(x)
-        x = self.res2(x)
-        x = self.res3(x)
-        x = self.res4(x)
-        x = self.res5(x)
-        x = self.res6(x)
-        x = self.res7(x)
-        x = self.res8(x)
-        x = self.res9(x)
+class ResnetAdaILNBlock(nn.Module):
+    # Residual блок для декодера. Использует adaILN, который принимает gamma и beta.
+    def __init__(self, dim, use_bias):
+        super(ResnetAdaILNBlock, self).__init__()
+        self.pad1 = nn.ReflectionPad2d(1)
+        self.conv1 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=0, bias=use_bias)
+        self.norm1 = adaILN(dim)
+        self.relu1 = nn.ReLU(True)
 
-        # 3.5 CAM-карта
-        cam = self.cam_map(x)
+        self.pad2 = nn.ReflectionPad2d(1)
+        self.conv2 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=0, bias=use_bias)
+        self.norm2 = adaILN(dim)
 
-        # 4. Разжатие
-        x = self.up1(x)
-        x = self.up2(x)
+    def forward(self, x, gamma, beta):
+        out = self.pad1(x)
+        out = self.conv1(out)
+        out = self.norm1(out, gamma, beta)
+        out = self.relu1(out)
+        out = self.pad2(out)
+        out = self.conv2(out)
+        out = self.norm2(out, gamma, beta)
 
-        # 5. Выход
-        return (self.final(x), cam)
+        return out + x
 
-    def count_parameters(self):
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-#Блок для проверки
-# if __name__ == "__main__":
-#     # Создаем случайную картинку 256x256 (1 картинка, 3 канала)
-#     dummy_input = torch.randn(1, 3, 256, 256)
-#
-#     # Инициализируем генератор
-#     generator = ResNetGenerator()
-#
-#     # Прогоняем картинку
-#     output, cam = generator(dummy_input)
-#
-#     print(generator.count_parameters())
-#     print(cam.shape)
-#     print(f"Вход: {dummy_input.shape}")
-#     print(f"Выход: {output.shape}")
-#     print(f"Мин. значение: {output.min().item():.4f}")
-#     print(f"Макс. значение: {output.max().item():.4f}")
+class ResnetGenerator(nn.Module):
+    def __init__(self, input_nc, output_nc, ngf=64, n_blocks=6, img_size=128, light=False):
+        assert (n_blocks >= 0)
+        super(ResnetGenerator, self).__init__()
+        self.input_nc = input_nc
+        self.output_nc = output_nc
+        self.ngf = ngf
+        self.n_blocks = n_blocks
+        self.img_size = img_size
+        self.light = light
+
+        DownBlock = []
+        # Первый слой
+        DownBlock += [nn.ReflectionPad2d(3),
+                      nn.Conv2d(input_nc, ngf, kernel_size=7, stride=1, padding=0, bias=False),
+                      nn.InstanceNorm2d(ngf),
+                      nn.ReLU(True)]
+
+        # Down-Sampling (энкодер)
+        n_downsampling = 2
+        for i in range(n_downsampling):
+            mult = 2 ** i
+            DownBlock += [nn.ReflectionPad2d(1),
+                          nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=0, bias=False),
+                          nn.InstanceNorm2d(ngf * mult * 2),
+                          nn.ReLU(True)]
+
+        # Down-Sampling Bottleneck (ResnetBlock)
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):
+            DownBlock += [ResnetBlock(ngf * mult, use_bias=False)]
+
+        # CAM (GAP + GMP) - вшит прямо сюда
+        self.gap_fc = nn.Linear(ngf * mult, 1, bias=False)
+        self.gmp_fc = nn.Linear(ngf * mult, 1, bias=False)
+        self.conv1x1 = nn.Conv2d(ngf * mult * 2, ngf * mult, kernel_size=1, stride=1, bias=True)
+        self.relu = nn.ReLU(True)
+
+        # FC слой для генерации gamma и beta
+        if self.light:
+            FC = [nn.Linear(ngf * mult, ngf * mult, bias=False),
+                  nn.ReLU(True),
+                  nn.Linear(ngf * mult, ngf * mult, bias=False),
+                  nn.ReLU(True)]
+        else:
+            FC = [nn.Linear(img_size // mult * img_size // mult * ngf * mult, ngf * mult, bias=False),
+                  nn.ReLU(True),
+                  nn.Linear(ngf * mult, ngf * mult, bias=False),
+                  nn.ReLU(True)]
+        self.gamma = nn.Linear(ngf * mult, ngf * mult, bias=False)
+        self.beta = nn.Linear(ngf * mult, ngf * mult, bias=False)
+
+        # Up-Sampling Bottleneck (ResnetAdaILNBlock)
+        for i in range(n_blocks):
+            setattr(self, 'UpBlock1_' + str(i + 1), ResnetAdaILNBlock(ngf * mult, use_bias=False))
+
+        # Up-Sampling
+        UpBlock2 = []
+        for i in range(n_downsampling):
+            mult = 2 ** (n_downsampling - i)
+            UpBlock2 += [nn.Upsample(scale_factor=2, mode='nearest'),
+                         nn.ReflectionPad2d(1),
+                         nn.Conv2d(ngf * mult, int(ngf * mult / 2), kernel_size=3, stride=1, padding=0, bias=False),
+                         ILN(int(ngf * mult / 2)),
+                         nn.ReLU(True)]
+
+        # Финальный слой
+        UpBlock2 += [nn.ReflectionPad2d(3),
+                     nn.Conv2d(ngf, output_nc, kernel_size=7, stride=1, padding=0, bias=False),
+                     nn.Tanh()]
+
+        self.DownBlock = nn.Sequential(*DownBlock)
+        self.FC = nn.Sequential(*FC)
+        self.UpBlock2 = nn.Sequential(*UpBlock2)
+
+    def forward(self, input):
+        x = self.DownBlock(input)
+
+        # CAM (GAP)
+        gap = torch.nn.functional.adaptive_avg_pool2d(x, 1)
+        gap_logit = self.gap_fc(gap.view(x.shape[0], -1))
+        gap_weight = list(self.gap_fc.parameters())[0]
+        gap = x * gap_weight.unsqueeze(2).unsqueeze(3)
+
+        # CAM (GMP)
+        gmp = torch.nn.functional.adaptive_max_pool2d(x, 1)
+        gmp_logit = self.gmp_fc(gmp.view(x.shape[0], -1))
+        gmp_weight = list(self.gmp_fc.parameters())[0]
+        gmp = x * gmp_weight.unsqueeze(2).unsqueeze(3)
+
+        # Объединение
+        cam_logit = torch.cat([gap_logit, gmp_logit], 1)
+        x = torch.cat([gap, gmp], 1)
+        x = self.relu(self.conv1x1(x))
+
+        heatmap = torch.sum(x, dim=1, keepdim=True)
+
+        # Генерация gamma и beta
+        if self.light:
+            x_ = torch.nn.functional.adaptive_avg_pool2d(x, 1)
+            x_ = self.FC(x_.view(x_.shape[0], -1))
+        else:
+            x_ = self.FC(x.view(x.shape[0], -1))
+        gamma, beta = self.gamma(x_), self.beta(x_)
+
+        # Проход через UpBlock1 (AdaILN)
+        for i in range(self.n_blocks):
+            x = getattr(self, 'UpBlock1_' + str(i + 1))(x, gamma, beta)
+
+        # Проход через UpBlock2 (ILN)
+        out = self.UpBlock2(x)
+
+        return out, cam_logit, heatmap

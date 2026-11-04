@@ -1,74 +1,69 @@
 import torch
 import torch.nn as nn
 
-from train.models.CAM import CAMMap
 
+class Discriminator(nn.Module):
+    def __init__(self, input_nc, ndf=64, n_layers=5):
+        super(Discriminator, self).__init__()
+        # Первый слой: без нормализации, но со SpectralNorm
+        model = [nn.ReflectionPad2d(1),
+                 nn.utils.spectral_norm(
+                 nn.Conv2d(input_nc, ndf, kernel_size=4, stride=2, padding=0, bias=True)),
+                 nn.LeakyReLU(0.2, True)]
 
-class PatchGANDiscriminator(nn.Module):
-    """
-    PatchGAN дискриминатор (строго по таблице).
-    Использует BCELoss, поэтому на выходе стоит Sigmoid.
-    """
+        # Промежуточные слои (от 1 до n_layers - 2)
+        for i in range(1, n_layers - 2):
+            mult = 2 ** (i - 1)
+            model += [nn.ReflectionPad2d(1),
+                      nn.utils.spectral_norm(
+                      nn.Conv2d(ndf * mult, ndf * mult * 2, kernel_size=4, stride=2, padding=0, bias=True)),
+                      nn.LeakyReLU(0.2, True)]
 
-    def __init__(self, input_nc=3, ndf=64):
-        super(PatchGANDiscriminator, self).__init__()
+        # Предпоследний слой (stride=1)
+        mult = 2 ** (n_layers - 2 - 1)
+        model += [nn.ReflectionPad2d(1),
+                  nn.utils.spectral_norm(
+                  nn.Conv2d(ndf * mult, ndf * mult * 2, kernel_size=4, stride=1, padding=0, bias=True)),
+                  nn.LeakyReLU(0.2, True)]
 
-        # Conv1: 64 фильтра, ядро 4x4, шаг 2, паддинг 1. Без нормализации.
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(input_nc, ndf, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
+        # Class Activation Map (GAP + GMP)
+        mult = 2 ** (n_layers - 2)
+        self.gap_fc = nn.utils.spectral_norm(nn.Linear(ndf * mult, 1, bias=False))
+        self.gmp_fc = nn.utils.spectral_norm(nn.Linear(ndf * mult, 1, bias=False))
+        self.conv1x1 = nn.Conv2d(ndf * mult * 2, ndf * mult, kernel_size=1, stride=1, bias=True)
+        self.leaky_relu = nn.LeakyReLU(0.2, True)
 
-        # Conv2: 128 фильтров. Заменили BatchNorm на InstanceNorm.
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(ndf, ndf * 2, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.InstanceNorm2d(ndf * 2),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
+        # Финальный слой для матрицы патчей
+        self.pad = nn.ReflectionPad2d(1)
+        self.conv = nn.utils.spectral_norm(
+            nn.Conv2d(ndf * mult, 1, kernel_size=4, stride=1, padding=0, bias=False))
 
-        # Conv3: 256 фильтров.
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(ndf * 2, ndf * 4, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.InstanceNorm2d(ndf * 4),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
+        self.model = nn.Sequential(*model)
 
-        # Conv4: 512 фильтров, но stride=1 (размер не уменьшается).
-        self.conv4 = nn.Sequential(
-            nn.Conv2d(ndf * 4, ndf * 8, kernel_size=4, stride=1, padding=1, bias=False),
-            nn.InstanceNorm2d(ndf * 8),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
+    def forward(self, input):
+        x = self.model(input)
 
-        self.cam_map = CAMMap(ndf * 8)
+        # Ветка GAP
+        gap = torch.nn.functional.adaptive_avg_pool2d(x, 1)
+        gap_logit = self.gap_fc(gap.view(x.shape[0], -1))
+        gap_weight = list(self.gap_fc.parameters())[0]
+        gap = x * gap_weight.unsqueeze(2).unsqueeze(3)
 
-        # Conv5: 1 фильтр (итоговая карта), stride=1.
-        self.conv5 = nn.Sequential(
-            nn.Conv2d(ndf * 8, 1, kernel_size=4, stride=1, padding=1),
-        )
+        # Ветка GMP
+        gmp = torch.nn.functional.adaptive_max_pool2d(x, 1)
+        gmp_logit = self.gmp_fc(gmp.view(x.shape[0], -1))
+        gmp_weight = list(self.gmp_fc.parameters())[0]
+        gmp = x * gmp_weight.unsqueeze(2).unsqueeze(3)
 
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        cam_map = self.cam_map(x)
-        x = self.conv5(x)
-        return (x, cam_map)
+        # Объединение логитов и тепловой карты
+        cam_logit = torch.cat([gap_logit, gmp_logit], 1)
+        x = torch.cat([gap, gmp], 1)
+        x = self.leaky_relu(self.conv1x1(x))
 
-    def count_parameters(self):
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        heatmap = torch.sum(x, dim=1, keepdim=True)
 
+        # Матрица патчей
+        x = self.pad(x)
+        out = self.conv(x)
 
-# # Блок для проверки
-# if __name__ == "__main__":
-#     # Подаем картинку 256x256
-#     dummy_input = torch.randn(1, 3, 256, 256)
-#     discriminator = PatchGANDiscriminator()
-#     output = discriminator(dummy_input)
-#
-#     print(discriminator.count_parameters())
-#     print(f"Вход: {dummy_input.shape}")
-#     print(f"Выход: {output.shape}")
-#     print(f"Мин. значение на выходе: {output.min().item():.4f}")
-#     print(f"Макс. значение на выходе: {output.max().item():.4f}")
+        return out, cam_logit, heatmap

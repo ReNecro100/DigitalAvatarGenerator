@@ -1,227 +1,218 @@
-from torch import nn
+import torch
+import torch.nn as nn
 import itertools
 from torchvision import transforms
-import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
 
-from data.datasets.double_dired_dataset import DoubledDiredDataset
 from data.datasets.dired_dataset import DiredDataset
-
-from train.models.discriminator import PatchGANDiscriminator
-from train.models.generator import ResNetGenerator
-
+from train.models.discriminator import Discriminator
+from train.models.generator import ResnetGenerator
+from train.models.AdaILN import RhoClipper
 from train_coeffs import *
 
 if __name__ == '__main__':
-    #Creating datasets
+    torch.backends.cudnn.benchmark = True
+    # 1. Подготовка данных
     tf = transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
-    cartoon_dataset = DiredDataset(CARTOONS_DATASET_DIRECTORY,tf)
-    real_photos_dataset = DiredDataset(REAL_PHOTOS_DATASET_DIRECTORY,tf)
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
 
-    #Creating dataloaders
-    cartoon_dataloader = DataLoader(cartoon_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
-    real_photos_dataloader = DataLoader(real_photos_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    cartoon_dataset = DiredDataset(CARTOONS_DATASET_DIRECTORY, tf)
+    real_photos_dataset = DiredDataset(REAL_PHOTOS_DATASET_DIRECTORY, tf)
 
-    #creating models
+    # В оригинале DataLoader без shuffle, но мы оставим shuffle=True для лучшего перемешивания
+    cartoon_dataloader = DataLoader(cartoon_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4,
+                                    pin_memory=True)
+    real_photos_dataloader = DataLoader(real_photos_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4,
+                                        pin_memory=True)
 
-    generator_g = ResNetGenerator().to(DEVICE) #photos->cartoons
-    optimizer_g = torch.optim.Adam(generator_g.parameters(), lr=LEARNING_RATE)
+    # 2. Создание моделей (строго по репозиторию)
+    # Генераторы (A->B и B->A)
+    genA2B = ResnetGenerator(input_nc=3, output_nc=3, ngf=64, n_blocks=N_RES, img_size=IMG_SIZE, light=LIGHT).to(DEVICE)
+    genB2A = ResnetGenerator(input_nc=3, output_nc=3, ngf=64, n_blocks=N_RES, img_size=IMG_SIZE, light=LIGHT).to(DEVICE)
 
-    generator_f = ResNetGenerator().to(DEVICE) #cartoons->photos
-    optimizer_f = torch.optim.Adam(generator_f.parameters(), lr=LEARNING_RATE)
+    # Дискриминаторы (2 глобальных, 2 локальных)
+    disGA = Discriminator(input_nc=3, ndf=64, n_layers=7).to(DEVICE)
+    disGB = Discriminator(input_nc=3, ndf=64, n_layers=7).to(DEVICE)
+    disLA = Discriminator(input_nc=3, ndf=64, n_layers=5).to(DEVICE)
+    disLB = Discriminator(input_nc=3, ndf=64, n_layers=5).to(DEVICE)
 
-    discriminator_y = PatchGANDiscriminator().to(DEVICE) #cartoons expert
-    criterion_d_y = nn.MSELoss()
-    optimizer_y = torch.optim.Adam(discriminator_y.parameters(), lr=LEARNING_RATE)
+    # 3. Функции потерь
+    L1_loss = nn.L1Loss().to(DEVICE)
+    MSE_loss = nn.MSELoss().to(DEVICE)
+    BCE_loss = nn.BCEWithLogitsLoss().to(DEVICE)
 
-    discriminator_x = PatchGANDiscriminator().to(DEVICE) #photos expert
-    criterion_d_x = nn.MSELoss()
-    optimizer_x = torch.optim.Adam(discriminator_x.parameters(), lr=LEARNING_RATE)
+    # 4. Оптимизаторы (один для всех G, один для всех D)
+    G_optim = torch.optim.Adam(itertools.chain(genA2B.parameters(), genB2A.parameters()), lr=LEARNING_RATE,
+                               betas=(0.5, 0.999))
+    D_optim = torch.optim.Adam(
+        itertools.chain(disGA.parameters(), disGB.parameters(), disLA.parameters(), disLB.parameters()),
+        lr=LEARNING_RATE, betas=(0.5, 0.999))
 
-    print(DEVICE)
+    # 5. RhoClipper (ограничивает значения rho в adaILN от 0 до 1)
+    Rho_clipper = RhoClipper(0, 1)
 
-    # dir for checkpoints
-    current_dir = os.path.dirname(os.path.abspath(__file__))  # папка train
-    project_root = os.path.dirname(current_dir)  # корень проекта
+    # Директория для чекпоинтов
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)
     checkpoints_dir = os.path.join(project_root, "checkpoints")
-
     os.makedirs(checkpoints_dir, exist_ok=True)
 
-    #train loop
+    # 6. Цикл обучения (один общий цикл, как в оригинале)
     for epoch in range(EPOCHS):
         print(f"Epoch {epoch + 1}/{EPOCHS}:")
-        # generator_g.load_state_dict(torch.load(f"{checkpoints_dir}/G_model_epoch30.pth"))
-        # generator_f.load_state_dict(torch.load(f"{checkpoints_dir}/F_model_epoch30.pth"))
-        # discriminator_y.load_state_dict(torch.load(f"{checkpoints_dir}/D_Y_model_epoch30.pth"))
-        # discriminator_x.load_state_dict(torch.load(f"{checkpoints_dir}/D_X_model_epoch30.pth"))
 
-        print(f"Training discriminators...")
-        # training discriminators
-        generator_g.eval()
-        generator_f.eval()
-
+        # Создаем бесконечные итераторы для батчей
         loader_X = iter(real_photos_dataloader)
         loader_Y = iter(cartoon_dataloader)
-        max_batches = min(len(real_photos_dataloader), len(cartoon_dataloader))
+        max_batches = 20 #min(len(real_photos_dataloader), len(cartoon_dataloader))
 
         for _ in tqdm(range(max_batches)):
-            # batches
-            real_X = next(loader_X)
-            real_Y = next(loader_Y)
+            # Получаем батчи (real_A = селфи, real_B = аниме)
+            try:
+                real_A = next(loader_X)
+            except StopIteration:
+                loader_X = iter(real_photos_dataloader)
+                real_A = next(loader_X)
 
-            real_X = real_X.to(DEVICE)
-            real_Y = real_Y.to(DEVICE)
+            try:
+                real_B = next(loader_Y)
+            except StopIteration:
+                loader_Y = iter(cartoon_dataloader)
+                real_B = next(loader_Y)
 
-            # true photos
-            pred_real_X, cam_D_X_real = discriminator_x(real_X)
-            loss_D_X_real = criterion_d_x(pred_real_X, torch.ones_like(pred_real_X))
-            loss_cam_D_X_real = criterion_d_x(cam_D_X_real, torch.ones_like(cam_D_X_real))
+            real_A = real_A.to(DEVICE)
+            real_B = real_B.to(DEVICE)
 
-            # fake photos
-            fake_X, _ = generator_f(real_Y)
-            pred_fake_X, cam_D_X_fake = discriminator_x(fake_X.detach())
-            loss_D_X_fake = criterion_d_x(pred_fake_X, torch.zeros_like(pred_fake_X))
-            loss_cam_D_X_fake = criterion_d_x(cam_D_X_fake, torch.zeros_like(cam_D_X_fake))
+            # ==========================================
+            # ОБНОВЛЕНИЕ ДИСКРИМИНАТОРОВ
+            # ==========================================
+            D_optim.zero_grad()
 
-            loss_cam_D_X = (loss_cam_D_X_real + loss_cam_D_X_fake) * 0.5
-            loss_D_X = (loss_D_X_real + loss_D_X_fake) * 0.5 + loss_cam_D_X
-
-            # real cartoons
-            pred_real_Y, cam_D_Y_real = discriminator_y(real_Y)
-            loss_D_Y_real = criterion_d_y(pred_real_Y, torch.ones_like(pred_real_Y))
-            loss_cam_D_Y_real = criterion_d_y(cam_D_Y_real, torch.ones_like(cam_D_Y_real))
-
-            # fake cartoons
-            fake_Y, _ = generator_g(real_X)
-            pred_fake_Y, cam_D_Y_fake = discriminator_y(fake_Y.detach())
-            loss_D_Y_fake = criterion_d_y(pred_fake_Y, torch.zeros_like(pred_fake_Y))
-            loss_cam_D_Y_fake = criterion_d_y(cam_D_Y_fake, torch.zeros_like(cam_D_Y_fake))
-
-            loss_cam_D_Y = (loss_cam_D_Y_real + loss_cam_D_Y_fake) * 0.5
-            loss_D_Y = (loss_D_Y_real + loss_D_Y_fake) * 0.5 + loss_cam_D_Y
-
-            # update the weights
-            optimizer_x.zero_grad()
-            optimizer_y.zero_grad()
-
-            loss_D_X.backward()
-            loss_D_Y.backward()
-
-            optimizer_x.step()
-            optimizer_y.step()
-
-        print(f"Training generators...")
-        # training generators
-        generator_g.train()
-        generator_f.train()
-
-        discriminator_y.eval()
-        discriminator_x.eval()
-
-        loader_X = iter(real_photos_dataloader)
-        loader_Y = iter(cartoon_dataloader)
-
-        torch.cuda.empty_cache()
-        for _ in tqdm(range(max_batches)):
-            # batches
-            real_X = next(loader_X)
-            real_Y = next(loader_Y)
-
-            real_X = real_X.to(DEVICE)
-            real_Y = real_Y.to(DEVICE)
-
-            # G generates
-            cartoon_G, cam_G = generator_g(real_X)
-
-            # adversarial loss
+            # Генерируем фейки (без градиентов для G)
             with torch.no_grad():
-                pred_fake_Y, cam_D_Y = discriminator_y(cartoon_G)
-            loss_adversarial_G = criterion_d_y(pred_fake_Y, torch.ones_like(pred_fake_Y))
+                fake_A2B, _, _ = genA2B(real_A)
+                fake_B2A, _, _ = genB2A(real_B)
 
-            # cycle loss
-            rec_X, _ = generator_f(cartoon_G)
-            loss_cycle_X = torch.nn.functional.l1_loss(rec_X, real_X)
+            # Прогон через дискриминаторы (3 выхода: out, cam_logit, heatmap)
+            real_GA_logit, real_GA_cam_logit, _ = disGA(real_A)
+            real_LA_logit, real_LA_cam_logit, _ = disLA(real_A)
+            real_GB_logit, real_GB_cam_logit, _ = disGB(real_B)
+            real_LB_logit, real_LB_cam_logit, _ = disLB(real_B)
 
-            # identity loss
-            identity_Y, _ = generator_g(real_Y)
-            loss_identity_Y = torch.nn.functional.l1_loss(identity_Y, real_Y)
+            fake_GA_logit, fake_GA_cam_logit, _ = disGA(fake_B2A)
+            fake_LA_logit, fake_LA_cam_logit, _ = disLA(fake_B2A)
+            fake_GB_logit, fake_GB_cam_logit, _ = disGB(fake_A2B)
+            fake_LB_logit, fake_LB_cam_logit, _ = disLB(fake_A2B)
 
-            # CAM Loss для генератора: сравниваем тепловые карты (пространственно)
-            # 1. Превращаем многоканальные карты в одноканальные (усредняем по каналам)
-            cam_G_map = cam_G.mean(dim=1, keepdim=True)  # [B, 1, 32, 32]
-            cam_D_Y_map = cam_D_Y.mean(dim=1, keepdim=True)  # [B, 1, 15, 15]
+            # Лоссы дискриминаторов (MSE для adversarial и CAM)
+            D_ad_loss_GA = MSE_loss(real_GA_logit, torch.ones_like(real_GA_logit)) + MSE_loss(fake_GA_logit,
+                                                                                              torch.zeros_like(
+                                                                                                  fake_GA_logit))
+            D_ad_cam_loss_GA = MSE_loss(real_GA_cam_logit, torch.ones_like(real_GA_cam_logit)) + MSE_loss(
+                fake_GA_cam_logit, torch.zeros_like(fake_GA_cam_logit))
 
-            # 2. Растягиваем карту генератора до размера карты дискриминатора
-            cam_G_resized = torch.nn.functional.interpolate(
-                cam_G_map,
-                size=cam_D_Y_map.shape[2:],
-                mode='bilinear',
-                align_corners=False
-            )
+            D_ad_loss_LA = MSE_loss(real_LA_logit, torch.ones_like(real_LA_logit)) + MSE_loss(fake_LA_logit,
+                                                                                              torch.zeros_like(
+                                                                                                  fake_LA_logit))
+            D_ad_cam_loss_LA = MSE_loss(real_LA_cam_logit, torch.ones_like(real_LA_cam_logit)) + MSE_loss(
+                fake_LA_cam_logit, torch.zeros_like(fake_LA_cam_logit))
 
-            # 3. Считаем L1-потерю между картами внимания
-            loss_cam_G = torch.nn.functional.l1_loss(cam_G_resized, cam_D_Y_map)
+            D_ad_loss_GB = MSE_loss(real_GB_logit, torch.ones_like(real_GB_logit)) + MSE_loss(fake_GB_logit,
+                                                                                              torch.zeros_like(
+                                                                                                  fake_GB_logit))
+            D_ad_cam_loss_GB = MSE_loss(real_GB_cam_logit, torch.ones_like(real_GB_cam_logit)) + MSE_loss(
+                fake_GB_cam_logit, torch.zeros_like(fake_GB_cam_logit))
 
-            # total loss
-            loss_G = (ADVERSIAL_WEIGHT * loss_adversarial_G) + (CYCLE_WEIGHT * loss_cycle_X) + (IDENTITY_WEIGHT * loss_identity_Y) + (CAM_WEIGHT * loss_cam_G)
+            D_ad_loss_LB = MSE_loss(real_LB_logit, torch.ones_like(real_LB_logit)) + MSE_loss(fake_LB_logit,
+                                                                                              torch.zeros_like(
+                                                                                                  fake_LB_logit))
+            D_ad_cam_loss_LB = MSE_loss(real_LB_cam_logit, torch.ones_like(real_LB_cam_logit)) + MSE_loss(
+                fake_LB_cam_logit, torch.zeros_like(fake_LB_cam_logit))
 
+            D_loss_A = ADVERSIAL_WEIGHT * (D_ad_loss_GA + D_ad_cam_loss_GA + D_ad_loss_LA + D_ad_cam_loss_LA)
+            D_loss_B = ADVERSIAL_WEIGHT * (D_ad_loss_GB + D_ad_cam_loss_GB + D_ad_loss_LB + D_ad_cam_loss_LB)
 
+            Discriminator_loss = D_loss_A + D_loss_B
+            Discriminator_loss.backward()
+            D_optim.step()
 
-            # F generates
-            cartoon_F, cam_F = generator_f(real_Y)
+            # ==========================================
+            # ОБНОВЛЕНИЕ ГЕНЕРАТОРОВ
+            # ==========================================
+            G_optim.zero_grad()
 
-            # adversarial loss
-            with torch.no_grad():
-                pred_fake_X, cam_D_X = discriminator_x(cartoon_F)
-            loss_adversarial_F = criterion_d_x(pred_fake_X, torch.ones_like(pred_fake_X))
+            # Генерируем фейки (теперь с градиентами)
+            fake_A2B, fake_A2B_cam_logit, _ = genA2B(real_A)
+            fake_B2A, fake_B2A_cam_logit, _ = genB2A(real_B)
 
-            # cycle loss
-            rec_Y, _ = generator_g(cartoon_F)
-            loss_cycle_Y = torch.nn.functional.l1_loss(rec_Y, real_Y)
+            # Цикл (возврат к оригиналу)
+            fake_A2B2A, _, _ = genB2A(fake_A2B)
+            fake_B2A2B, _, _ = genA2B(fake_B2A)
 
-            # identity loss
-            identity_X, _ = generator_f(real_X)
-            loss_identity_X = torch.nn.functional.l1_loss(identity_X, real_X)
+            # Identity (генератор не должен менять то, что уже в его домене)
+            fake_A2A, fake_A2A_cam_logit, _ = genB2A(real_A)
+            fake_B2B, fake_B2B_cam_logit, _ = genA2B(real_B)
 
-            # CAM Loss для генератора: сравниваем тепловые карты (пространственно)
-            # 1. Превращаем многоканальные карты в одноканальные (усредняем по каналам)
-            cam_F_map = cam_F.mean(dim=1, keepdim=True)  # [B, 1, 32, 32]
-            cam_D_X_map = cam_D_X.mean(dim=1, keepdim=True)  # [B, 1, 15, 15]
+            # Прогон через дискриминаторы (для лоссов G)
+            fake_GA_logit, fake_GA_cam_logit, _ = disGA(fake_B2A)
+            fake_LA_logit, fake_LA_cam_logit, _ = disLA(fake_B2A)
+            fake_GB_logit, fake_GB_cam_logit, _ = disGB(fake_A2B)
+            fake_LB_logit, fake_LB_cam_logit, _ = disLB(fake_A2B)
 
-            # 2. Растягиваем карту генератора до размера карты дискриминатора
-            cam_F_resized = torch.nn.functional.interpolate(
-                cam_F_map,
-                size=cam_D_X_map.shape[2:],
-                mode='bilinear',
-                align_corners=False
-            )
+            # Adversarial лоссы генераторов (MSE)
+            G_ad_loss_GA = MSE_loss(fake_GA_logit, torch.ones_like(fake_GA_logit))
+            G_ad_cam_loss_GA = MSE_loss(fake_GA_cam_logit, torch.ones_like(fake_GA_cam_logit))
+            G_ad_loss_LA = MSE_loss(fake_LA_logit, torch.ones_like(fake_LA_logit))
+            G_ad_cam_loss_LA = MSE_loss(fake_LA_cam_logit, torch.ones_like(fake_LA_cam_logit))
+            G_ad_loss_GB = MSE_loss(fake_GB_logit, torch.ones_like(fake_GB_logit))
+            G_ad_cam_loss_GB = MSE_loss(fake_GB_cam_logit, torch.ones_like(fake_GB_cam_logit))
+            G_ad_loss_LB = MSE_loss(fake_LB_logit, torch.ones_like(fake_LB_logit))
+            G_ad_cam_loss_LB = MSE_loss(fake_LB_cam_logit, torch.ones_like(fake_LB_cam_logit))
 
-            # 3. Считаем L1-потерю между картами внимания
-            loss_cam_F = torch.nn.functional.l1_loss(cam_F_resized, cam_D_X_map)
+            # Cycle и Identity лоссы (L1)
+            G_recon_loss_A = L1_loss(fake_A2B2A, real_A)
+            G_recon_loss_B = L1_loss(fake_B2A2B, real_B)
+            G_identity_loss_A = L1_loss(fake_A2A, real_A)
+            G_identity_loss_B = L1_loss(fake_B2B, real_B)
 
-            # (lambda_cycle=10, lambda_identity=0.5)
-            loss_F = (ADVERSIAL_WEIGHT * loss_adversarial_F) + (CYCLE_WEIGHT * loss_cycle_Y) + (IDENTITY_WEIGHT * loss_identity_X) + (CAM_WEIGHT * loss_cam_F)
+            # CAM лоссы генераторов (BCE!)
+            G_cam_loss_A = BCE_loss(fake_B2A_cam_logit, torch.ones_like(fake_B2A_cam_logit)) + BCE_loss(
+                fake_A2A_cam_logit, torch.zeros_like(fake_A2A_cam_logit))
+            G_cam_loss_B = BCE_loss(fake_A2B_cam_logit, torch.ones_like(fake_A2B_cam_logit)) + BCE_loss(
+                fake_B2B_cam_logit, torch.zeros_like(fake_B2B_cam_logit))
 
+            # Суммарные лоссы G
+            G_loss_A = ADVERSIAL_WEIGHT * (G_ad_loss_GA + G_ad_cam_loss_GA + G_ad_loss_LA + G_ad_cam_loss_LA) + \
+                       CYCLE_WEIGHT * G_recon_loss_A + \
+                       IDENTITY_WEIGHT * G_identity_loss_A + \
+                       CAM_WEIGHT * G_cam_loss_A
 
+            G_loss_B = ADVERSIAL_WEIGHT * (G_ad_loss_GB + G_ad_cam_loss_GB + G_ad_loss_LB + G_ad_cam_loss_LB) + \
+                       CYCLE_WEIGHT * G_recon_loss_B + \
+                       IDENTITY_WEIGHT * G_identity_loss_B + \
+                       CAM_WEIGHT * G_cam_loss_B
 
-            # update the weights
-            optimizer_g.zero_grad()
-            optimizer_f.zero_grad()
+            Generator_loss = G_loss_A + G_loss_B
+            Generator_loss.backward()
+            G_optim.step()
 
-            loss_G.backward()
-            loss_F.backward()
+            # Обязательно после шага оптимизатора ограничиваем rho в adaILN
+            genA2B.apply(Rho_clipper)
+            genB2A.apply(Rho_clipper)
 
-            optimizer_g.step()
-            optimizer_f.step()
+        # Сохранение
         if (epoch + 1) % 5 == 0 or (epoch + 1) == EPOCHS:
-            # Сохраняем веса
-            torch.save(generator_g.state_dict(), os.path.join(checkpoints_dir, f"G_model_epoch{epoch + 1}.pth"))
-            torch.save(generator_f.state_dict(), os.path.join(checkpoints_dir, f"F_model_epoch{epoch + 1}.pth"))
-            torch.save(discriminator_x.state_dict(), os.path.join(checkpoints_dir, f"D_X_model_epoch{epoch + 1}.pth"))
-            torch.save(discriminator_y.state_dict(), os.path.join(checkpoints_dir, f"D_Y_model_epoch{epoch + 1}.pth"))
+            torch.save({
+                'genA2B': genA2B.state_dict(),
+                'genB2A': genB2A.state_dict(),
+                'disGA': disGA.state_dict(),
+                'disGB': disGB.state_dict(),
+                'disLA': disLA.state_dict(),
+                'disLB': disLB.state_dict()
+            }, os.path.join(checkpoints_dir, f"checkpoint_epoch_{epoch + 1}.pth"))
+            print(f"✅ Эпоха {epoch + 1} сохранена!")
